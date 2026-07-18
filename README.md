@@ -16,6 +16,7 @@ Unofficial, community-maintained **OpenAPI 3.1** description of the
 | File | Purpose |
 |------|---------|
 | `openapi.yaml` | The OpenAPI 3.1 description. |
+| `docs/apex-programming.md` | Reference for the output `prog` field: observed programming-language statement forms and the `tdata` schedule-line encoding. |
 | `redocly.yaml` | Lint configuration. |
 | `package.json` | `lint` / `preview` / `bundle` scripts. |
 | `captures/` | Local-only raw capture payloads (git-ignored; may contain secrets). |

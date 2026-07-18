@@ -2021,7 +2021,12 @@ components:
           description: |
             The output's control program (Apex programming language source).
             Encodes behavioural settings including `tdata` schedule lines (dosing
-            amounts/times, pump flow schedules, light ramps).
+            amounts/times, pump flow schedules, light ramps). See the companion
+            `docs/apex-programming.md` for the observed statement forms and the
+            `tdata` encoding.
+          externalDocs:
+            description: Apex output programming reference (prog / tdata)
+            url: https://github.com/reliablereefs/apex-specs/blob/main/docs/apex-programming.md
           example: "Set PF1\n"
         log:
           type: boolean
