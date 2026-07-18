@@ -5,11 +5,11 @@
   "description": "Unofficial OpenAPI description of the Neptune Apex Fusion cloud API",
   "scripts": {
     "lint": "redocly lint",
-    "preview": "redocly preview-docs openapi.yaml",
+    "preview": "redocly preview --product redoc",
     "bundle": "redocly bundle openapi.yaml -o dist/openapi.bundled.yaml",
     "docs": "redocly build-docs openapi.yaml -o dist/index.html"
   },
   "devDependencies": {
-    "@redocly/cli": "^1.0.0"
+    "@redocly/cli": "^2.0.0"
   }
 }
