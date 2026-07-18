@@ -1,0 +1,2209 @@
+openapi: 3.1.0
+info:
+  title: Neptune Apex Fusion Cloud API
+  version: 0.1.0
+  summary: Unofficial OpenAPI description of the Neptune Systems Apex Fusion cloud service.
+  description: |
+    Reverse-engineered, community-maintained description of the **Apex Fusion**
+    cloud API served at `https://apexfusion.com`. Apex Fusion is Neptune Systems'
+    cloud service for remote monitoring and control of Apex aquarium controllers.
+
+    **This is not an official Neptune Systems specification.** It is derived from
+    live network captures of the Fusion web app plus community reverse-engineering,
+    and it describes only the endpoints and fields that have been observed. Field
+    lists are therefore *incomplete by construction* and hardware-dependent — a
+    controller with different modules/equipment will surface different `inputs`,
+    `outputs`, `modules`, and `config` entries.
+
+    ### Authentication
+    Fusion uses **session-cookie authentication** with **CSRF protection**:
+
+    1. `GET` any Fusion page (e.g. `/`). The HTML contains
+       `<meta name="csrf-token" content="…">` and the response sets a pre-auth
+       `connect.sid` session cookie.
+    2. `POST /login` with the JSON credentials, sending the CSRF token in the
+       `csrf-token` request header. On success the response sets a new,
+       authenticated `connect.sid` cookie (HttpOnly, Secure).
+    3. All subsequent `/api/**` calls send the authenticated `connect.sid` cookie.
+       Mutating calls also require the `csrf-token` header.
+
+    ### Conventions
+    - Every XHR sends `X-Requested-With: XMLHttpRequest` and an
+      **`Accept-Version`** header selecting the API contract version (observed: `4`).
+    - Browser GETs append a jQuery cache-buster query param `_=<epoch-ms>`.
+      It is **not** part of the API contract and is omitted from this spec.
+  contact:
+    name: reliablereefs/apex-specs
+
+servers:
+  - url: https://apexfusion.com
+    description: Apex Fusion production cloud
+
+security:
+  - connectSid: []
+
+tags:
+  - name: Authentication
+    description: Session login and the current-user resource.
+  - name: Controllers
+    description: Listing and inspecting Apex controllers linked to the account.
+  - name: Status
+    description: Live status of a controller's inputs, outputs, and modules.
+  - name: Logs & history
+    description: |
+      Historical time-series and event logs. Value logs record probe/device
+      readings over time; event logs record output state changes and alarms.
+  - name: Account & notifications
+    description: |
+      Account-level (user-scoped, not per-controller) resources: profile and
+      alert-delivery targets.
+  - name: Calendar & diagnostics
+    description: Scheduled reminders/events and controller diagnostics.
+  - name: Control
+    description: |
+      State-changing operations that affect the physical system. All require the
+      `csrf-token` header in addition to the session cookie. The Fusion web app
+      performs updates by PUTting the full resource representation, which the
+      server echoes back with the applied state.
+  - name: Configuration
+    description: |
+      Controller programming: input calibration, output programs, modules,
+      profiles, network, and related settings. The complete config tree is also
+      embedded in the controller document (`GET /api/apex/{apexId}` → `config`);
+      several sub-resources (`inputs`, `outputs`, `modules`, `profiles`,
+      `network`, `heartbeat`, `flo`) are additionally addressable individually.
+      Others (`clock`, `display`, `misc`, `ebg`) are only available embedded.
+
+paths:
+  /login:
+    post:
+      operationId: login
+      tags: [Authentication]
+      summary: Authenticate and start a session
+      description: |
+        Exchanges credentials for an authenticated session. On success the
+        response sets an authenticated `connect.sid` cookie used for all
+        subsequent requests. Requires the `csrf-token` header carrying the token
+        from the page's `<meta name="csrf-token">`.
+      security:
+        - csrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              username: your-username
+              password: your-password
+              remember_me: false
+      responses:
+        '200':
+          description: |
+            Authentication succeeded. An authenticated `connect.sid` cookie is set
+            via `Set-Cookie`. The body is the session/user bootstrap object.
+          headers:
+            Set-Cookie:
+              description: Authenticated `connect.sid` session cookie (HttpOnly, Secure).
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/user:
+    get:
+      operationId: getCurrentUser
+      tags: [Authentication]
+      summary: Get the current user / session bootstrap
+      description: |
+        Returns the current user context and UI preferences. When called before
+        authentication the `username` is an empty string, which is how the web app
+        detects a logged-out session.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: Current user context (empty `username` if unauthenticated).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+              examples:
+                unauthenticated:
+                  summary: Logged-out session
+                  value:
+                    username: ''
+                    display:
+                      covers: touch
+                      list: {}
+
+  /api/user/profile:
+    get:
+      operationId: getUserProfile
+      tags: [Account & notifications]
+      summary: Get the account profile
+      description: The account holder's name, email, mailing address, and geolocation.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: Account profile.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/user/notification:
+    get:
+      operationId: listNotificationTargets
+      tags: [Account & notifications]
+      summary: List alert-delivery targets
+      description: |
+        The account's notification targets — the email addresses and mobile
+        devices Fusion can send alerts to.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: Notification targets.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NotificationTarget'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/user/notification/{notificationId}/test:
+    parameters:
+      - name: notificationId
+        in: path
+        required: true
+        description: The notification target's `_id`.
+        schema:
+          type: string
+    post:
+      operationId: testNotificationTarget
+      tags: [Account & notifications]
+      summary: Send a test notification (inferred)
+      description: |
+        Sends a test alert to the given notification target.
+
+        **Inferred / unverified:** this operation was identified from the Fusion
+        web bundle but was **not** exercised during capture (it produces a real
+        side effect — an actual notification to the user's device). The request
+        body and response shape are therefore not confirmed.
+      security:
+        - connectSid: []
+          csrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: Test notification dispatched (shape unconfirmed).
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/scheme:
+    get:
+      operationId: getScheme
+      tags: [Account & notifications]
+      summary: Get a named scheme
+      description: |
+        Returns a user scheme (e.g. UI color schemes) selected by `type`. Returns
+        an array; empty when none are defined.
+      parameters:
+        - name: type
+          in: query
+          required: true
+          description: Scheme type (e.g. `color`).
+          schema:
+            type: string
+          example: color
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: Scheme entries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadQuery'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/apex:
+    get:
+      operationId: listControllers
+      tags: [Controllers]
+      summary: List controllers linked to the account
+      description: |
+        Returns a paginated list of Apex controllers the authenticated user can
+        access. The response is a two-element array: `[pagination, controllers]`.
+      parameters:
+        - name: page
+          in: query
+          description: 1-based page number.
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: per_page
+          in: query
+          description: Page size.
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 20
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: A page of controllers.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllerListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/apex/{apexId}:
+    parameters:
+      - $ref: '#/components/parameters/ApexId'
+    get:
+      operationId: getController
+      tags: [Controllers]
+      summary: Get a single controller document
+      description: |
+        Returns the full controller document, including embedded live `status`,
+        `config`, `things`, `layout`, and connection `link` metadata.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: The controller document.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Controller'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/apex/{apexId}/status/outputs/{did}:
+    parameters:
+      - $ref: '#/components/parameters/ApexId'
+      - $ref: '#/components/parameters/Did'
+    put:
+      operationId: setOutputState
+      tags: [Control]
+      summary: Set an output's live state
+      description: |
+        Sets the live state of an output (e.g. turn an outlet `ON`/`OFF`, or
+        return it to `AUTO` with `AON`/`AOF`). The request body is the output's
+        `StatusOutput` representation with the desired state in `status[0]`; the
+        server echoes the resulting state back.
+
+        **This changes physical equipment state.** Verified by live capture
+        against a feeder output (`did` `23_1`).
+      security:
+        - connectSid: []
+          csrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StatusOutput'
+            example:
+              did: '23_1'
+              gid: ''
+              name: Feeder_23_1
+              type: afs
+              ID: 87
+              status: ['OFF', '', 'OK', '']
+      responses:
+        '200':
+          description: The output's state after the change.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusOutput'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/apex/{apexId}/status:
+    parameters:
+      - $ref: '#/components/parameters/ApexId'
+    get:
+      operationId: getControllerStatus
+      tags: [Status]
+      summary: Get live status for a controller
+      description: |
+        Returns the current live status: sensor `inputs` (probes), controllable
+        `outputs` (outlets, pumps, dosers, lights), AquaBus `modules`, plus alarm,
+        feed, network, and power state.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: Live controller status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApexStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/apex/{apexId}/ilog:
+    parameters:
+      - $ref: '#/components/parameters/ApexId'
+    get:
+      operationId: getInputLog
+      tags: [Logs & history]
+      summary: Input (probe) history log
+      description: |
+        Periodic snapshots of all input values over the requested window. Each
+        item is one timestamped snapshot containing every input's `did`/`value`.
+      parameters:
+        - $ref: '#/components/parameters/Days'
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: Input history.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InputLog'
+        '400':
+          $ref: '#/components/responses/BadQuery'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/apex/{apexId}/dlog:
+    parameters:
+      - $ref: '#/components/parameters/ApexId'
+    get:
+      operationId: getDataLog
+      tags: [Logs & history]
+      summary: Device data log
+      description: Per-device value samples for a given date window.
+      parameters:
+        - $ref: '#/components/parameters/Date'
+        - $ref: '#/components/parameters/Days'
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: Device value samples.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DeviceValueEntry'
+        '400':
+          $ref: '#/components/responses/BadQuery'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/apex/{apexId}/tlog:
+    parameters:
+      - $ref: '#/components/parameters/ApexId'
+    get:
+      operationId: getTridentLog
+      tags: [Logs & history]
+      summary: Trident measurement log
+      description: |
+        Automated lab measurements (e.g. from a Trident/Trident NP module) with a
+        per-reading `confidence` score.
+      parameters:
+        - $ref: '#/components/parameters/Days'
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: Trident measurements.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TridentLogEntry'
+        '400':
+          $ref: '#/components/responses/BadQuery'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/apex/{apexId}/dose:
+    parameters:
+      - $ref: '#/components/parameters/ApexId'
+    get:
+      operationId: getDoseLog
+      tags: [Logs & history]
+      summary: Dosing log
+      description: Dosing events per doser device, `value` in the device's units (e.g. mL).
+      parameters:
+        - $ref: '#/components/parameters/Days'
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: Dose events.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DeviceValueEntry'
+        '400':
+          $ref: '#/components/responses/BadQuery'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/apex/{apexId}/oday:
+    parameters:
+      - $ref: '#/components/parameters/ApexId'
+    get:
+      operationId: getOutputDayLog
+      tags: [Logs & history]
+      summary: Output state-change log
+      description: |
+        Timestamped output state-change events over the requested window. The
+        `limited` flag indicates the response was truncated.
+      parameters:
+        - $ref: '#/components/parameters/Days'
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: Output state changes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OutputDayLog'
+        '400':
+          $ref: '#/components/responses/BadQuery'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/apex/{apexId}/olog:
+    parameters:
+      - $ref: '#/components/parameters/ApexId'
+    get:
+      operationId: getOutputLog
+      tags: [Logs & history]
+      summary: Output log (paginated)
+      description: Paginated output state-change events for a given date.
+      parameters:
+        - $ref: '#/components/parameters/Date'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: A page of output events.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OutputLogResponse'
+        '400':
+          $ref: '#/components/responses/BadQuery'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/apex/{apexId}/alog:
+    parameters:
+      - $ref: '#/components/parameters/ApexId'
+    get:
+      operationId: getAlarmLog
+      tags: [Logs & history]
+      summary: Alarm log (paginated)
+      description: |
+        Paginated alarm/alert history for a given date. The alarm-entry shape is
+        not yet modeled (the sampled controller had no alarm entries in-window).
+      parameters:
+        - $ref: '#/components/parameters/Date'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PerPage'
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: A page of alarm events.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlarmLogResponse'
+        '400':
+          $ref: '#/components/responses/BadQuery'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/apex/{apexId}/calendar:
+    parameters:
+      - $ref: '#/components/parameters/ApexId'
+    get:
+      operationId: getCalendar
+      tags: [Calendar & diagnostics]
+      summary: List calendar reminders/events
+      description: |
+        Scheduled maintenance reminders and calendar events. `before` filters to
+        events dated before the given time.
+      parameters:
+        - name: before
+          in: query
+          required: false
+          description: Return only events dated before this time (ISO 8601 or a date).
+          schema:
+            type: string
+          example: '2026-07-18'
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: Calendar events.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CalendarEvent'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/apex/{apexId}/diag:
+    parameters:
+      - $ref: '#/components/parameters/ApexId'
+    get:
+      operationId: getDiagnostics
+      tags: [Calendar & diagnostics]
+      summary: Controller diagnostics
+      description: |
+        Diagnostic entries for the controller. Returns an array (empty when there
+        are no current diagnostics). The entry shape is not yet modeled (the
+        sampled controller returned no entries).
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: Diagnostic entries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/apex/{apexId}/config/inputs:
+    parameters:
+      - $ref: '#/components/parameters/ApexId'
+    get:
+      operationId: getInputConfig
+      tags: [Configuration]
+      summary: Input configuration
+      description: Per-input configuration including calibration `extra` and `alarm` thresholds.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: Input configuration list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ConfigInput'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/apex/{apexId}/config/outputs:
+    parameters:
+      - $ref: '#/components/parameters/ApexId'
+    get:
+      operationId: getOutputConfig
+      tags: [Configuration]
+      summary: Output configuration
+      description: Per-output configuration including the control program (`prog`) and control type (`ctype`).
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: Output configuration list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ConfigOutput'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/apex/{apexId}/config/modules:
+    parameters:
+      - $ref: '#/components/parameters/ApexId'
+    get:
+      operationId: getModuleConfig
+      tags: [Configuration]
+      summary: Module configuration
+      description: Per-AquaBus-module configuration. `extra` is module-type specific.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: Module configuration list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ConfigModule'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/apex/{apexId}/config/profiles:
+    parameters:
+      - $ref: '#/components/parameters/ApexId'
+    get:
+      operationId: getProfileConfig
+      tags: [Configuration]
+      summary: Profile configuration
+      description: Reusable control profiles (pump, light, etc.). `data` is profile-type specific.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: Profile list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ConfigProfile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/apex/{apexId}/config/network:
+    parameters:
+      - $ref: '#/components/parameters/ApexId'
+    get:
+      operationId: getNetworkConfig
+      tags: [Configuration]
+      summary: Network configuration
+      description: |
+        Network and notification (email/SMTP) configuration. Richer than the
+        `network` block in `/status`.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: Network configuration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigNetwork'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/apex/{apexId}/config/network/nsi:
+    parameters:
+      - $ref: '#/components/parameters/ApexId'
+    get:
+      operationId: getFirmwareInfo
+      tags: [Configuration]
+      summary: Firmware / AOS release info
+      description: Metadata and release notes for the controller's firmware level.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: Firmware release info.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FirmwareInfo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/apex/{apexId}/config/heartbeat:
+    parameters:
+      - $ref: '#/components/parameters/ApexId'
+    get:
+      operationId: getHeartbeatConfig
+      tags: [Configuration]
+      summary: Heartbeat configuration
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: Heartbeat configuration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Heartbeat'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/apex/{apexId}/config/flo:
+    parameters:
+      - $ref: '#/components/parameters/ApexId'
+    get:
+      operationId: getFlowConfig
+      tags: [Configuration]
+      summary: Flow-monitoring configuration
+      description: List of device ids participating in flow monitoring.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: Flow configuration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Flo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/apex/{apexId}/config/inputs/{did}:
+    parameters:
+      - $ref: '#/components/parameters/ApexId'
+      - $ref: '#/components/parameters/Did'
+    get:
+      operationId: getInputConfigItem
+      tags: [Configuration]
+      summary: Configuration for a single input
+      description: Addressed by the input's `did`.
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: Input configuration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigInput'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      operationId: updateInputConfig
+      tags: [Control]
+      summary: Update an input's configuration
+      description: |
+        Replaces an input's configuration (calibration `extra`, `alarm`
+        thresholds, enable). The request body is the full `ConfigInput`; the
+        server echoes the stored config back.
+
+        **This changes controller programming.** Verified by live capture of a
+        calibration change on an alkalinity input (`did` `28_0`).
+      security:
+        - connectSid: []
+          csrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfigInput'
+      responses:
+        '200':
+          description: The stored input configuration after the update.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigInput'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/apex/{apexId}/config/outputs/{did}:
+    parameters:
+      - $ref: '#/components/parameters/ApexId'
+      - $ref: '#/components/parameters/Did'
+    get:
+      operationId: getOutputConfigItem
+      tags: [Configuration]
+      summary: Configuration for a single output
+      description: |
+        Addressed by the output's `did` (e.g. `25_6`). The numeric `ID` is **not**
+        accepted here (`400 Invalid output ID`).
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: Output configuration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigOutput'
+        '400':
+          $ref: '#/components/responses/BadQuery'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      operationId: updateOutputConfig
+      tags: [Control]
+      summary: Update an output's configuration/program
+      description: |
+        Replaces an output's configuration. The request body is the full
+        `ConfigOutput`; the server echoes the stored config back.
+
+        Behavioural settings — dosing amounts/schedules, pump flow schedules,
+        light ramps — are encoded in the `prog` string (Apex programming
+        language, including `tdata` schedule lines). For accessory pumps
+        (`MXMPump|…`) the `extra` object additionally carries `gph`, `modes`,
+        and `temperature`.
+
+        **This changes controller programming.** Verified by live capture: a
+        dosing-amount change on a `dos` output (`did` `22_2`) and a flow-schedule
+        change on an `MXMPump` (`did` `34_7`).
+      security:
+        - connectSid: []
+          csrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfigOutput'
+      responses:
+        '200':
+          description: The stored output configuration after the update.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigOutput'
+        '400':
+          $ref: '#/components/responses/BadQuery'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/apex/{apexId}/config/profiles/{profileId}:
+    parameters:
+      - $ref: '#/components/parameters/ApexId'
+      - name: profileId
+        in: path
+        required: true
+        description: The profile's numeric `ID`.
+        schema:
+          type: integer
+        example: 1
+    get:
+      operationId: getProfileConfigItem
+      tags: [Configuration]
+      summary: Configuration for a single profile
+      description: Addressed by the profile's numeric `ID` (a non-numeric value returns `400`).
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: Profile configuration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigProfile'
+        '400':
+          $ref: '#/components/responses/BadQuery'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      operationId: updateProfileConfig
+      tags: [Control]
+      summary: Update a profile's configuration
+      description: |
+        Replaces a control profile. The request body is the full `ConfigProfile`;
+        the server echoes the stored profile back.
+
+        **This changes controller programming.** Verified by live capture of a
+        profile re-upload (`PF1`, a `pump` profile).
+      security:
+        - connectSid: []
+          csrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfigProfile'
+      responses:
+        '200':
+          description: The stored profile after the update.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigProfile'
+        '400':
+          $ref: '#/components/responses/BadQuery'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/apex/{apexId}/config/modules/{abaddr}:
+    parameters:
+      - $ref: '#/components/parameters/ApexId'
+      - name: abaddr
+        in: path
+        required: true
+        description: The module's AquaBus address.
+        schema:
+          type: integer
+        example: 1
+    get:
+      operationId: getModuleConfigItem
+      tags: [Configuration]
+      summary: Configuration for a single module
+      description: Addressed by the module's AquaBus address (`abaddr`).
+      parameters:
+        - $ref: '#/components/parameters/AcceptVersion'
+        - $ref: '#/components/parameters/XRequestedWith'
+      responses:
+        '200':
+          description: Module configuration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigModule'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+components:
+  securitySchemes:
+    connectSid:
+      type: apiKey
+      in: cookie
+      name: connect.sid
+      description: |
+        Express/connect session cookie issued by `POST /login`. HttpOnly and
+        Secure; not accessible to JavaScript.
+    csrfToken:
+      type: apiKey
+      in: header
+      name: csrf-token
+      description: |
+        CSRF token read from the page's `<meta name="csrf-token">`. Required on
+        `POST /login` and on all state-changing requests.
+
+  parameters:
+    ApexId:
+      name: apexId
+      in: path
+      required: true
+      description: The controller's Fusion document id (a MongoDB ObjectId).
+      schema:
+        type: string
+        pattern: '^[0-9a-f]{24}$'
+      example: 5f9a1b2c3d4e5f6071829304
+    AcceptVersion:
+      name: Accept-Version
+      in: header
+      required: false
+      description: API contract version selector. The Fusion web app sends `4`.
+      schema:
+        type: string
+        default: '4'
+      example: '4'
+    XRequestedWith:
+      name: X-Requested-With
+      in: header
+      required: false
+      description: Marks the call as an XHR. The web app always sends `XMLHttpRequest`.
+      schema:
+        type: string
+        default: XMLHttpRequest
+    CsrfToken:
+      name: csrf-token
+      in: header
+      required: true
+      description: CSRF token from the page's `<meta name="csrf-token">`.
+      schema:
+        type: string
+    Days:
+      name: days
+      in: query
+      required: true
+      description: Size of the history window in days, ending now.
+      schema:
+        type: integer
+        minimum: 1
+      example: 7
+    Date:
+      name: date
+      in: query
+      required: true
+      description: |
+        Target date the log window is anchored to. Accepts a plain date
+        (`YYYY-MM-DD`) or a full ISO 8601 date-time (the web app sends e.g.
+        `2026-07-17T05:00:00.000Z`).
+      schema:
+        type: string
+      example: '2026-07-17'
+    Page:
+      name: page
+      in: query
+      required: true
+      description: 1-based page number.
+      schema:
+        type: integer
+        minimum: 1
+      example: 1
+    PerPage:
+      name: per_page
+      in: query
+      required: true
+      description: Page size.
+      schema:
+        type: integer
+        minimum: 1
+      example: 50
+    Did:
+      name: did
+      in: path
+      required: true
+      description: A device id (e.g. `base_pH`, `25_6`).
+      schema:
+        type: string
+      example: base_pH
+
+  responses:
+    BadQuery:
+      description: |
+        A required query parameter is missing or invalid. The body is a
+        JSON-encoded string naming the offending parameter, e.g.
+        `"query.days is required"`.
+      content:
+        application/json:
+          schema:
+            type: string
+          example: '"query.days" is required'
+    Unauthorized:
+      description: Not authenticated, or the session has expired.
+    Forbidden:
+      description: |
+        Authenticated but not permitted — e.g. the CSRF token is missing/invalid,
+        or the account only has view (not control) access to this controller.
+    NotFound:
+      description: The controller does not exist or is not accessible to this account.
+
+  schemas:
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+        remember_me:
+          type: boolean
+          default: false
+          description: Extends session lifetime when true.
+      additionalProperties: false
+
+    LoginResponse:
+      type: object
+      description: Session bootstrap returned on successful login.
+      properties:
+        redirect:
+          type: string
+          description: Path the web app should navigate to after login.
+          example: /apex
+        username:
+          type: string
+        verified:
+          type: boolean
+          description: Whether the account's email is verified.
+        beta:
+          type: boolean
+        unread:
+          type: integer
+          description: Unread message count.
+        bounce:
+          type: integer
+        invalid:
+          type: integer
+        apex:
+          type: object
+          description: Account-level Apex settings (e.g. linked Alexa id).
+          additionalProperties: true
+        display:
+          $ref: '#/components/schemas/DisplayPrefs'
+        toured:
+          type: object
+          description: Map of UI onboarding tours the user has completed.
+          additionalProperties:
+            type: boolean
+        mlog:
+          type: object
+          description: Maintenance-log reminder configuration, keyed by module.
+          additionalProperties: true
+      additionalProperties: true
+
+    User:
+      type: object
+      description: |
+        Current user context. An empty `username` indicates an unauthenticated
+        session. When authenticated, mirrors most of `LoginResponse`.
+      properties:
+        username:
+          type: string
+        verified:
+          type: boolean
+        beta:
+          type: boolean
+        unread:
+          type: integer
+        bounce:
+          type: integer
+        invalid:
+          type: integer
+        apex:
+          type: object
+          description: Account-level Apex settings (e.g. linked Alexa id).
+          additionalProperties: true
+        display:
+          $ref: '#/components/schemas/DisplayPrefs'
+        toured:
+          type: object
+          additionalProperties:
+            type: boolean
+        mlog:
+          type: object
+          additionalProperties: true
+      additionalProperties: true
+
+    UserProfile:
+      type: object
+      description: Account holder profile.
+      properties:
+        _id:
+          type: string
+        name:
+          type: string
+          example: Jane Reefer
+        email:
+          type: string
+          format: email
+          example: reefer@example.com
+        address:
+          type: string
+        geo:
+          type: array
+          description: '`[latitude, longitude]`.'
+          minItems: 2
+          maxItems: 2
+          items:
+            type: number
+          example: [0, 0]
+      additionalProperties: true
+
+    NotificationTarget:
+      type: object
+      description: A destination Fusion can deliver alerts to.
+      required: [_id, method, recipient]
+      properties:
+        _id:
+          type: string
+          description: Target id (used in the test-notification path).
+        method:
+          type: string
+          description: |
+            Delivery channel. Observed: `email`, `ios`, `android` (the latter two
+            are mobile push). Not an exhaustive enum.
+          example: email
+        recipient:
+          type: string
+          description: |
+            The address/device the alert is sent to (email address for `email`;
+            an opaque push token/device id for `ios`/`android`).
+        verified:
+          type: boolean
+          description: Whether the target has confirmed opt-in.
+        invalid:
+          type: boolean
+          description: Whether delivery to this target has been failing.
+        blocked:
+          type: boolean
+          description: Whether the target is blocked (e.g. hard bounce / unsubscribe).
+      additionalProperties: true
+
+    DisplayPrefs:
+      type: object
+      description: UI display preferences.
+      properties:
+        covers:
+          type: string
+          example: touch
+        period:
+          type: boolean
+        list:
+          type: object
+          additionalProperties: true
+      additionalProperties: true
+
+    ControllerListResponse:
+      type: array
+      description: '`[pagination, controllers]` tuple.'
+      minItems: 2
+      maxItems: 2
+      prefixItems:
+        - $ref: '#/components/schemas/Pagination'
+        - type: array
+          items:
+            $ref: '#/components/schemas/Controller'
+      items: false
+
+    Pagination:
+      type: object
+      required: [total_entries]
+      properties:
+        total_entries:
+          type: integer
+          description: Total number of controllers available across all pages.
+          example: 2
+      additionalProperties: true
+
+    Controller:
+      type: object
+      description: |
+        A linked Apex controller. Deep sub-trees (`config`, `things`, `layout`,
+        `voice`, `extra`) are modeled loosely here and will be detailed in later
+        increments of this spec.
+      required: [_id, type, serial, hostname]
+      properties:
+        _id:
+          type: string
+          pattern: '^[0-9a-f]{24}$'
+          description: Fusion document id (MongoDB ObjectId).
+          example: 5f9a1b2c3d4e5f6071829304
+        type:
+          type: string
+          description: Controller family.
+          example: AC6
+        serial:
+          type: string
+          description: Hardware serial, formatted `AC6:NNNNN`.
+          example: AC6:12345
+        hostname:
+          type: string
+          description: User-assigned controller name.
+          example: reef
+        hardware:
+          type: string
+          example: '1.0'
+        software:
+          type: string
+          description: Installed firmware version.
+          example: 5.15_6B26
+        timezone:
+          type: string
+          example: America/Chicago
+        auth:
+          type: integer
+          description: Caller's permission/authorization level for this controller.
+        reminder:
+          type: integer
+        __v:
+          type: integer
+          description: Mongoose document version key.
+        status:
+          $ref: '#/components/schemas/ApexStatus'
+        link:
+          $ref: '#/components/schemas/ControllerLink'
+        limit:
+          type: object
+          description: Data/usage limit accounting.
+          properties:
+            last:
+              type: string
+              format: date-time
+            size:
+              type: number
+          additionalProperties: true
+        config:
+          $ref: '#/components/schemas/ApexConfig'
+        things:
+          type: object
+          description: Linked "things"/integrations. Not yet fully modeled.
+          additionalProperties: true
+        layout:
+          type: object
+          description: Dashboard layout. Not yet fully modeled.
+          additionalProperties: true
+        voice:
+          type: object
+          additionalProperties: true
+        extra:
+          type: object
+          additionalProperties: true
+        media:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        metadata:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+      additionalProperties: true
+
+    ControllerLink:
+      type: object
+      description: Cloud-link connection metadata for the controller.
+      properties:
+        live:
+          type: object
+          description: Present when the controller currently has a live cloud link.
+          properties:
+            _id:
+              type: string
+            uid:
+              type: integer
+            sid:
+              type: integer
+            date:
+              type: string
+              format: date-time
+            client:
+              type: string
+              description: Controller-side client address as seen by the cloud.
+            server:
+              type: string
+          additionalProperties: true
+        date:
+          type: string
+          format: date-time
+        when:
+          type: string
+          format: date-time
+      additionalProperties: true
+
+    ApexStatus:
+      type: object
+      description: Live status snapshot for a controller.
+      required: [inputs, outputs, modules]
+      properties:
+        inputs:
+          type: array
+          description: Sensor/probe readings and virtual inputs.
+          items:
+            $ref: '#/components/schemas/StatusInput'
+        outputs:
+          type: array
+          description: Controllable outputs (outlets, pumps, dosers, lights, alerts).
+          items:
+            $ref: '#/components/schemas/StatusOutput'
+        modules:
+          type: array
+          description: AquaBus modules attached to the controller.
+          items:
+            $ref: '#/components/schemas/StatusModule'
+        alarm:
+          $ref: '#/components/schemas/AlarmStatus'
+        cal:
+          type: object
+          description: Most recent probe calibration event.
+          properties:
+            did:
+              type: string
+            value:
+              type: number
+            state:
+              type: integer
+            date:
+              type: string
+              format: date-time
+          additionalProperties: true
+        clock:
+          type: object
+          properties:
+            skew:
+              type: integer
+              description: Clock skew in seconds relative to the cloud.
+          additionalProperties: true
+        command:
+          type: object
+          description: Result of the most recent command sent to the controller.
+          properties:
+            errorCode:
+              type: integer
+            errorMessage:
+              type: string
+          additionalProperties: true
+        feed:
+          type: object
+          description: Feed-cycle state.
+          properties:
+            date:
+              type: string
+              format: date-time
+            name:
+              type: integer
+              description: Active feed cycle index (0 when none active).
+            active:
+              type: integer
+              description: 1 while a feed cycle is running, 0 otherwise.
+          additionalProperties: true
+        network:
+          $ref: '#/components/schemas/NetworkStatus'
+        power:
+          type: object
+          description: Last power failure/restore timestamps.
+          properties:
+            failed:
+              type: string
+              format: date-time
+            restored:
+              type: string
+              format: date-time
+          additionalProperties: true
+      additionalProperties: true
+
+    StatusInput:
+      type: object
+      description: A single sensor/probe or virtual input reading.
+      required: [did, name, type, value]
+      properties:
+        did:
+          type: string
+          description: Device id of the input (e.g. `base_pH`, `34_5`).
+          example: base_pH
+        name:
+          type: string
+          description: User-assigned input name.
+          example: pH
+        type:
+          type: string
+          description: |
+            Measurement/input type. Hardware-dependent; observed values include
+            `pH`, `ORP`, `Temp`, `Cond`, `alk`, `ca`, `mg`, `no3`, `po4`, `Amps`,
+            `volts`, `pwr`, `gph`, `digital`, `in`. Not an exhaustive enum.
+          example: pH
+        value:
+          type: number
+          description: Current reading in the input's native units.
+          example: 7.48
+      additionalProperties: true
+
+    StatusOutput:
+      type: object
+      description: A single controllable output.
+      required: [ID, did, name, type, status]
+      properties:
+        ID:
+          type: integer
+          description: Numeric output index within the controller.
+        did:
+          type: string
+          description: Device id of the output (e.g. `25_6`, `base_Var1`).
+          example: '25_6'
+        gid:
+          type: string
+          description: Group id, or empty string when ungrouped.
+        name:
+          type: string
+          description: User-assigned output name.
+          example: Heater
+        type:
+          type: string
+          description: |
+            Output type. Hardware-dependent; observed values include `outlet`,
+            `variable`, `alert`, `24v`, `virtual`, `dos`, `dqd`, `afs`,
+            `selector`, and `MXMPump|<vendor>|<model>` (e.g.
+            `MXMPump|Ecotech|Vortech`). Not an exhaustive enum.
+          example: outlet
+        status:
+          $ref: '#/components/schemas/OutputStatusTuple'
+      additionalProperties: true
+
+    OutputStatusTuple:
+      type: array
+      description: |
+        Positional status tuple for an output. Length is 4 for most outputs and
+        5 for dosing outputs (`dos`/`dqd`). Positions decoded from observation:
+
+        - `[0]` **state** — e.g. `ON`, `OFF`, `AON` (auto-on), `AOF` (auto-off),
+          `TBL` (profile/table controlled), `PF1`–`PF4` (profile references).
+        - `[1]` **intensity/level** — numeric string for variable outputs
+          (e.g. `"14"`), empty otherwise.
+        - `[2]` **health/mode** — e.g. `OK`, `Cnst`, `Lgon`, `Sync`, or empty.
+        - `[3]` (dosing) dose configuration value (numeric string), else empty.
+        - `[4]` (dosing) dose amount/remaining value (numeric string).
+
+        Blank positions are represented as empty strings.
+      minItems: 4
+      maxItems: 5
+      items:
+        type: string
+      example: ["AON", "", "OK", ""]
+
+    StatusModule:
+      type: object
+      description: An AquaBus module attached to the controller.
+      required: [abaddr, hwtype, present]
+      properties:
+        abaddr:
+          type: integer
+          description: AquaBus address.
+        hwtype:
+          type: string
+          description: Module hardware type (e.g. `FMM`, `EB832`, `1LINK`).
+          example: FMM
+        hwrev:
+          type: integer
+        swrev:
+          type: integer
+        swstat:
+          type: string
+          description: Software status (e.g. `OK`).
+          example: OK
+        pcount:
+          type: integer
+          description: Total AquaBus packet count.
+        pgood:
+          type: integer
+          description: Good packet count.
+        perror:
+          type: integer
+          description: Errored packet count.
+        reatt:
+          type: integer
+          description: Re-attach count.
+        inact:
+          type: integer
+          description: Inactivity count.
+        boot:
+          type: boolean
+        present:
+          type: boolean
+          description: Whether the module is currently present on the bus.
+        extra:
+          type: object
+          additionalProperties: true
+      additionalProperties: true
+
+    AlarmStatus:
+      type: object
+      description: Controller alarm state.
+      properties:
+        date:
+          type: string
+          format: date-time
+        smnt:
+          type: string
+          description: Human-readable alarm statement.
+          example: Alarm is off
+        status:
+          type: string
+          description: Alarm status (e.g. `ON`, `OFF`).
+          example: 'OFF'
+      additionalProperties: true
+
+    NetworkStatus:
+      type: object
+      description: Controller network state.
+      properties:
+        dhcp:
+          type: boolean
+        hostname:
+          type: string
+        ipaddr:
+          type: string
+        netmask:
+          type: string
+        gateway:
+          type: string
+        dns:
+          type: array
+          items:
+            type: string
+        httpPort:
+          type: integer
+        ssid:
+          type: string
+        link:
+          type: boolean
+        quality:
+          type: integer
+        strength:
+          type: integer
+        wifiAP:
+          type: boolean
+        wifiAPLock:
+          type: boolean
+        updateFirmware:
+          type: boolean
+        latestFirmware:
+          type: string
+          description: Latest firmware available for this controller.
+          example: 5.15_6B26
+      additionalProperties: true
+
+    DeviceValueEntry:
+      type: object
+      description: A single timestamped device reading (used by `dlog` and `dose`).
+      required: [date, did, value]
+      properties:
+        date:
+          type: string
+          format: date-time
+        did:
+          type: string
+          description: Device id.
+          example: '22_2'
+        value:
+          type: number
+      additionalProperties: true
+
+    TridentLogEntry:
+      type: object
+      description: A single Trident lab measurement with confidence.
+      required: [date, did, value]
+      properties:
+        date:
+          type: string
+          format: date-time
+        did:
+          type: string
+          example: '28_1'
+        value:
+          type: number
+        confidence:
+          type: number
+          description: Measurement confidence, 0–1.
+          minimum: 0
+          maximum: 1
+          example: 0.9958
+      additionalProperties: true
+
+    DeviceStatusEntry:
+      type: object
+      description: A single output state-change event (used by `oday` and `olog`).
+      required: [date, did, status]
+      properties:
+        date:
+          type: string
+          format: date-time
+        did:
+          type: string
+          example: '33_1'
+        status:
+          type: string
+          description: Output state after the change (e.g. `ON`, `OFF`, `TBL`).
+          example: 'OFF'
+      additionalProperties: true
+
+    InputLog:
+      type: object
+      description: Periodic snapshots of input values over time.
+      required: [items]
+      properties:
+        limit:
+          type: integer
+          description: 0 when the full window was returned; non-zero when truncated.
+        items:
+          type: array
+          items:
+            type: object
+            required: [date, inputs]
+            properties:
+              date:
+                type: string
+                format: date-time
+              inputs:
+                type: array
+                description: One entry per input at this timestamp.
+                items:
+                  type: object
+                  required: [did, value]
+                  properties:
+                    did:
+                      type: string
+                      example: base_Temp
+                    value:
+                      type: number
+                      example: 77.6
+                  additionalProperties: true
+            additionalProperties: true
+      additionalProperties: true
+
+    OutputDayLog:
+      type: object
+      description: Output state-change events over a day window.
+      required: [items]
+      properties:
+        limited:
+          type: boolean
+          description: True when the result set was truncated.
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeviceStatusEntry'
+      additionalProperties: true
+
+    OutputLogResponse:
+      type: array
+      description: '`[pagination, events]` tuple of output state-change events.'
+      minItems: 2
+      maxItems: 2
+      prefixItems:
+        - $ref: '#/components/schemas/Pagination'
+        - type: array
+          items:
+            $ref: '#/components/schemas/DeviceStatusEntry'
+      items: false
+
+    AlarmLogResponse:
+      type: array
+      description: |
+        `[pagination, alarms]` tuple. The alarm-entry shape is not yet modeled
+        (no in-window entries were available on the sampled controller).
+      minItems: 2
+      maxItems: 2
+      prefixItems:
+        - $ref: '#/components/schemas/Pagination'
+        - type: array
+          items:
+            type: object
+            additionalProperties: true
+      items: false
+
+    ApexConfig:
+      type: object
+      description: |
+        Full controller configuration tree, as embedded in the controller
+        document. Individual sub-resources are also addressable via
+        `GET /api/apex/{apexId}/config/{name}`.
+      properties:
+        inputs:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConfigInput'
+        outputs:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConfigOutput'
+        modules:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConfigModule'
+        profiles:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConfigProfile'
+        network:
+          $ref: '#/components/schemas/ConfigNetwork'
+        heartbeat:
+          $ref: '#/components/schemas/Heartbeat'
+        flo:
+          $ref: '#/components/schemas/Flo'
+        clock:
+          type: object
+          description: Clock / timezone / DST configuration.
+          properties:
+            dst:
+              type: boolean
+            auto:
+              type: boolean
+            date:
+              type: array
+              items:
+                type: string
+                format: date-time
+            timezone:
+              type: array
+              description: '`[standard, dst]` UTC offsets in hours (as strings).'
+              items:
+                type: string
+          additionalProperties: true
+        display:
+          type: array
+          description: Local-display page configuration.
+          items:
+            type: object
+            properties:
+              page:
+                type: integer
+              lineEnables:
+                type: array
+                items:
+                  type: boolean
+              probes:
+                type: array
+                items:
+                  type: string
+              outputs:
+                type: array
+                items:
+                  type: string
+            additionalProperties: true
+        misc:
+          type: object
+          description: Miscellaneous controller settings.
+          properties:
+            almSound:
+              type: string
+              description: Alarm sound name.
+            wrnSound:
+              type: string
+              description: Warning sound name.
+            logInterval:
+              type: integer
+              description: Datalog interval in seconds.
+            feedInterval:
+              type: array
+              description: Feed cycle durations (seconds) for feed cycles A–D.
+              items:
+                type: integer
+            pwrMon:
+              type: boolean
+              description: Power monitoring enabled.
+          additionalProperties: true
+        ebg:
+          type: object
+          description: EnergyBar/group configuration. Not yet modeled.
+          additionalProperties: true
+      additionalProperties: true
+
+    ConfigInput:
+      type: object
+      description: Configuration for a single input/probe.
+      required: [did, name, type]
+      properties:
+        enable:
+          type: boolean
+        did:
+          type: string
+          example: base_pH
+        name:
+          type: string
+          example: pH
+        type:
+          type: string
+          description: Input type (see `StatusInput.type`).
+          example: pH
+        extra:
+          type: object
+          description: |
+            Type-specific settings such as calibration `scale`/`offset`,
+            temperature `range` (`Faren`/`Celsius`), and `comp` (compensation).
+            Fields vary by input type.
+          additionalProperties: true
+        alarm:
+          type: object
+          description: Alarm thresholds; empty when no alarm is configured.
+          properties:
+            min:
+              type: number
+            max:
+              type: number
+          additionalProperties: true
+      additionalProperties: true
+
+    ConfigOutput:
+      type: object
+      description: Configuration for a single output.
+      required: [ID, did, type, name]
+      properties:
+        ID:
+          type: string
+          description: Output index (string in config, integer in status).
+          example: '0'
+        did:
+          type: string
+          example: base_Var1
+        type:
+          type: string
+          description: Output type (see `StatusOutput.type`).
+          example: variable
+        ctype:
+          type: string
+          description: |
+            Control type. Observed: `Advanced` (custom program), `Always`,
+            `Feeder`, `Light`. Not an exhaustive enum.
+          example: Advanced
+        gid:
+          type: string
+          description: Group id, empty when ungrouped.
+        gtype:
+          type: string
+        name:
+          type: string
+          example: VarSpd1_I1
+        icon:
+          type: string
+        prog:
+          type: string
+          description: |
+            The output's control program (Apex programming language source).
+            Encodes behavioural settings including `tdata` schedule lines (dosing
+            amounts/times, pump flow schedules, light ramps).
+          example: "Set PF1\n"
+        log:
+          type: boolean
+        inuse:
+          type: boolean
+        extra:
+          type: object
+          description: |
+            Type-specific extra configuration. For accessory pumps (`MXMPump|…`)
+            this includes `temperature` (bool), `gph` (`{min, max}`), and `modes`
+            (array of `{id, name}`, e.g. Constant/Random/Pulse/Sync/AntiSync).
+          additionalProperties: true
+      additionalProperties: true
+
+    ConfigModule:
+      type: object
+      description: Configuration for a single AquaBus module.
+      required: [abaddr, hwtype]
+      properties:
+        abaddr:
+          type: integer
+        name:
+          type: string
+          example: FMM_1
+        hwtype:
+          type: string
+          example: FMM
+        update:
+          type: boolean
+        extra:
+          type: object
+          description: |
+            Module-type-specific configuration (e.g. for an FMM: `serial`,
+            `auth`, per-port `auto`/`mode`, `flowMode`, `levelMode`). Fields vary
+            by module type.
+          additionalProperties: true
+      additionalProperties: true
+
+    ConfigProfile:
+      type: object
+      description: A reusable control profile.
+      required: [ID, name, type]
+      properties:
+        ID:
+          type: integer
+        name:
+          type: string
+          example: PF1
+        type:
+          type: string
+          description: Profile type. Observed `pump`; others (e.g. light) exist.
+          example: pump
+        data:
+          type: object
+          description: Profile-type-specific parameters.
+          additionalProperties: true
+      additionalProperties: true
+
+    ConfigNetwork:
+      type: object
+      description: Network and email/SMTP notification configuration.
+      properties:
+        dhcp:
+          type: boolean
+        hostname:
+          type: string
+        ipaddr:
+          type: string
+        netmask:
+          type: string
+        gateway:
+          type: string
+        dns:
+          type: array
+          items:
+            type: string
+        httpPort:
+          type: integer
+        ssid:
+          type: string
+        wifiAP:
+          type: boolean
+        wifiAPLock:
+          type: boolean
+        wifiEnable:
+          type: boolean
+        emailAuth:
+          type: boolean
+        emailEnable:
+          type: boolean
+        emailFrom:
+          type: string
+        emailTo:
+          type: string
+        emailUser:
+          type: string
+        reEmail:
+          type: integer
+          description: Re-notify interval in minutes.
+        smtpPort:
+          type: integer
+        smtpServer:
+          type: string
+        updateFirmware:
+          type: boolean
+      additionalProperties: true
+
+    FirmwareInfo:
+      type: object
+      description: Firmware / AOS release metadata.
+      properties:
+        _id:
+          type: string
+        __v:
+          type: integer
+        active:
+          type: boolean
+        date:
+          type: string
+          format: date-time
+        level:
+          type: string
+          description: Firmware version string.
+          example: 5.15_6B26
+        notes:
+          type: string
+          description: Release notes (may contain newlines).
+      additionalProperties: true
+
+    Heartbeat:
+      type: object
+      properties:
+        enable:
+          type: boolean
+      additionalProperties: true
+
+    Flo:
+      type: object
+      description: Flow-monitoring configuration.
+      properties:
+        dids:
+          type: array
+          description: Device ids participating in flow monitoring.
+          items:
+            type: string
+      additionalProperties: true
+
+    CalendarEvent:
+      type: object
+      description: A scheduled reminder or calendar event.
+      required: [_id, title, date]
+      properties:
+        _id:
+          type: string
+        __v:
+          type: integer
+        title:
+          type: string
+          example: Re-Fill Kalk
+        level:
+          type: integer
+          description: Priority/severity level.
+          example: 4
+        date:
+          type: string
+          format: date-time
+          description: Next occurrence.
+        type:
+          type: integer
+          description: Event type discriminator.
+          example: 0
+        mode:
+          type: integer
+          description: Recurrence/scheduling mode.
+          example: 1
+        when:
+          type: string
+          description: Human-readable recurrence (e.g. `4 weeks`).
+          example: 4 weeks
+        data:
+          type: string
+          description: Type-specific payload; empty when unused.
+        note:
+          type: boolean
+      additionalProperties: true

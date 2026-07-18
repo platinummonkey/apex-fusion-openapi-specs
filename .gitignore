@@ -1,0 +1,6 @@
+captures/
+*.network-request
+*.network-response
+.DS_Store
+node_modules/
+dist/

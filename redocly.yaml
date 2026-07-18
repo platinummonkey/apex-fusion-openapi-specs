@@ -1,0 +1,19 @@
+# Redocly lint configuration for the Apex Fusion OpenAPI description.
+# See https://redocly.com/docs/cli/configuration
+extends:
+  - recommended
+
+rules:
+  # /api/user intentionally returns 200 even when unauthenticated (empty
+  # username), so a 4xx response is not always present on read endpoints.
+  operation-4xx-response: off
+  # License is a repository-level decision left to the maintainer.
+  info-license: off
+  info-license-strict: off
+  # Validate embedded examples against their schemas.
+  no-invalid-schema-examples: error
+  no-invalid-parameter-examples: error
+
+apis:
+  fusion:
+    root: openapi.yaml
